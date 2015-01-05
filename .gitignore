@@ -4,3 +4,4 @@ deploy.sh
 screenshots/
 tests/qemu/test-i386
 *.map
+.DS_Store
