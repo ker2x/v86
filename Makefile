@@ -3,11 +3,11 @@ BROWSER=chromium
 
 CPP_VERSION := $(shell cpp --version 2>/dev/null)
 
-ifdef CPP_VERSION
-	CPP=cpp -P -undef -Wundef -std=c99 -nostdinc -Wtrigraphs -fdollars-in-identifiers -C
-else
+#ifdef CPP_VERSION
+#	CPP=cpp -P -undef -Wundef -std=c99 -nostdinc -Wtrigraphs -fdollars-in-identifiers -C
+#else
 	CPP=mcpp/src/mcpp -a -C -P 
-endif
+#endif
 
 
 all: build/v86_all.js
