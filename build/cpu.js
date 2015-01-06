@@ -5926,8 +5926,7 @@ CPU.prototype.do_run = function()
 
 // KERU //
 
-// this.devices.vga.timer();
-
+    this.devices.vga.timer();
 
 // outer loop:
 
