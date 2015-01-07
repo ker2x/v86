@@ -1,17 +1,18 @@
-; ============================================
-; Copyright (C) 2014 Laurent "ker2x" Laborde
+; ==============================================
+; Copyright (C) 20142015 Laurent "ker2x" Laborde
 ;
-; MBR for the Oak64 bootloader
+; MBR for the Oak32 bootloader
+; v86 Edition (js x86 emulator)
 ;
 ; Some documentation
 ; http://wiki.osdev.org/MBR
 ; http://wiki.osdev.org/Memory_Map_(x86)
 ;
-; ============================================
+; ==============================================
 
 
-; List of guaranteed usable memory
-; --------------------------------
+; List of (eventually) guaranteed usable memory
+; ---------------------------------------------
 ;
 ; 0000:0500 -> 0007:7BFF (almost 30KiB)
 ; 0000:7E00 -> 007F:FFFF (480.5KiB)
@@ -54,7 +55,6 @@ ORG 0x0600
 relocate:
 	; First stuff we need to do is relocate the mbr at 0600
 	; use MOVSW to copy DS:SI to ES:DI
-	;xchg bx, bx	; Bochs magic debug
 	xor ax, ax
 	mov es, ax
 	mov ds, ax
@@ -69,9 +69,10 @@ relocate:
 relocated:
 
 	; 80x25 video mode (will clear screen)
-	mov ax, 0x003
-	int 0x10
+	;mov ax, 0x003
+	;int 0x10
 
+	; Hello !
 	mov si, msg_hello
 	call print
 
@@ -90,24 +91,27 @@ relocated:
 	; If there is an error, the CF will be set, and the error code will be in AH. 
 	; On success, the CF is clear, and AH==0. 
 	; Specifically, AH==0x86 means the function is not supported, and you will have to use another method.
-	;mov ax, 0x2401
-	;int 0x15
+	mov ax, 0x2401
+	int 0x15
 
 
 	; Disable blinking
+	; (doesn't do anything on v86)
 	;mov ax, 0x1003
 	;mov bx, 0x0000
 	;int 0x10
 	
-
+	; Job done!
 	mov si, msg_done
 	call print
-
-	;xchg bx, bx	; Bochs magic debug
 
 
 ; BMFS Disk layout
 ; ----------------
+;
+; -----------------------------------------------------------
+; /!\ i keep it for reference but i won't use BMFS on v86 /!\
+; -----------------------------------------------------------
 ;
 ; The first and last disk blocks are reserved for file system usage. All other disk blocks can be used for data.
 ;
@@ -155,6 +159,10 @@ relocated:
 ;   - Bootloader is at offset 8192 (0x2000)
 ;   - The kernel must immediatly follow the bootloader
 
+; New notes
+; ---------
+; The bootloader is now juster after the MBR, at offset 512
+; However we still copy it to 0x8000
 
 	mov si, msg_readdisk
 	call print
