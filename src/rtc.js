@@ -1,16 +1,59 @@
+"use strict";
+
+/** @const */ var CMOS_RTC_SECONDS = 0x00;
+/** @const */ var CMOS_RTC_SECONDS_ALARM = 0x01;
+/** @const */ var CMOS_RTC_MINUTES = 0x02;
+/** @const */ var CMOS_RTC_MINUTES_ALARM = 0x03;
+/** @const */ var CMOS_RTC_HOURS = 0x04;
+/** @const */ var CMOS_RTC_HOURS_ALARM = 0x05;
+/** @const */ var CMOS_RTC_DAY_WEEK = 0x06;
+/** @const */ var CMOS_RTC_DAY_MONTH = 0x07;
+/** @const */ var CMOS_RTC_MONTH = 0x08;
+/** @const */ var CMOS_RTC_YEAR = 0x09;
+/** @const */ var CMOS_STATUS_A = 0x0a;
+/** @const */ var CMOS_STATUS_B = 0x0b;
+/** @const */ var CMOS_STATUS_C = 0x0c;
+/** @const */ var CMOS_STATUS_D = 0x0d;
+/** @const */ var CMOS_RESET_CODE = 0x0f;
+
+/** @const */ var CMOS_FLOPPY_DRIVE_TYPE = 0x10;
+/** @const */ var CMOS_DISK_DATA = 0x12;
+/** @const */ var CMOS_EQUIPMENT_INFO = 0x14;
+/** @const */ var CMOS_MEM_BASE_LOW = 0x15;
+/** @const */ var CMOS_MEM_BASE_HIGH = 0x16;
+/** @const */ var CMOS_MEM_OLD_EXT_LOW = 0x17;
+/** @const */ var CMOS_MEM_OLD_EXT_HIGH = 0x18;
+/** @const */ var CMOS_DISK_DRIVE1_TYPE = 0x19;
+/** @const */ var CMOS_DISK_DRIVE2_TYPE = 0x1a;
+/** @const */ var CMOS_DISK_DRIVE1_CYL = 0x1b;
+/** @const */ var CMOS_DISK_DRIVE2_CYL = 0x24;
+/** @const */ var CMOS_MEM_EXTMEM_LOW = 0x30;
+/** @const */ var CMOS_MEM_EXTMEM_HIGH = 0x31;
+/** @const */ var CMOS_CENTURY = 0x32;
+/** @const */ var CMOS_MEM_EXTMEM2_LOW = 0x34;
+/** @const */ var CMOS_MEM_EXTMEM2_HIGH = 0x35;
+/** @const */ var CMOS_BIOS_BOOTFLAG1 = 0x38;
+/** @const */ var CMOS_BIOS_DISKTRANSFLAG = 0x39;
+/** @const */ var CMOS_BIOS_BOOTFLAG2 = 0x3d;
+/** @const */ var CMOS_MEM_HIGHMEM_LOW = 0x5b;
+/** @const */ var CMOS_MEM_HIGHMEM_MID = 0x5c;
+/** @const */ var CMOS_MEM_HIGHMEM_HIGH = 0x5d;
+/** @const */ var CMOS_BIOS_SMP_COUNT = 0x5f;
+
+
 /**
  * RTC (real time clock) and CMOS
  * @constructor
+ * @param {CPU} cpu
  */
-function RTC(cpu, diskette_type, boot_order)
+function RTC(cpu)
 {
+    /** @const @type {CPU} */
     this.cpu = cpu;
-    this.pic = cpu.devices.pic;
 
     this.cmos_index = 0;
-    this.boot_order = boot_order;
-    this.diskette_type = diskette_type;
-        
+    this.cmos_data = new Uint8Array(128);
+
     // used for cmos entries
     this.rtc_time = Date.now();
     this.last_update = this.rtc_time;
@@ -37,43 +80,82 @@ function RTC(cpu, diskette_type, boot_order)
         this.nmi_disabled = out_byte >> 7;
     });
 
-    cpu.io.register_write(0x71, this, this.cmos_write);
-    cpu.io.register_read(0x71, this, this.cmos_read);
-
-    this._state_skip = ["cpu", "pic"];
+    cpu.io.register_write(0x71, this, this.cmos_port_write);
+    cpu.io.register_read(0x71, this, this.cmos_port_read);
 }
+
+RTC.prototype.get_state = function()
+{
+    var state = [];
+
+    state[0] = this.cmos_index;
+    state[1] = this.cmos_data;
+    state[2] = this.rtc_time;
+    state[3] = this.last_update;
+    state[4] = this.next_interrupt;
+    state[5] = this.cmos_c_was_read;
+    state[6] = this.periodic_interrupt;
+    state[7] = this.periodic_interrupt_time;
+    state[8] = this.cmos_a;
+    state[9] = this.cmos_b;
+    state[10] = this.cmos_c;
+    state[11] = this.nmi_disabled;
+
+    return state;
+};
+
+RTC.prototype.set_state = function(state)
+{
+    this.cmos_index = state[0];
+    this.cmos_data = state[1];
+    this.rtc_time = state[2];
+    this.last_update = state[3];
+    this.next_interrupt = state[4];
+    this.cmos_c_was_read = state[5];
+    this.periodic_interrupt = state[6];
+    this.periodic_interrupt_time = state[7];
+    this.cmos_a = state[8];
+    this.cmos_b = state[9];
+    this.cmos_c = state[10];
+    this.nmi_disabled = state[11];
+};
 
 RTC.prototype.timer = function(time, legacy_mode)
 {
+    time = Date.now(); // XXX
+    this.rtc_time += time - this.last_update;
+    this.last_update = time;
+
     if(this.periodic_interrupt && this.cmos_c_was_read && this.next_interrupt < time)
     {
         this.cmos_c_was_read = false;
-        this.pic.push_irq(8);
-        this.cmos_c |= 1 << 6;
+        this.cpu.device_raise_irq(8);
+        this.cmos_c |= 1 << 6 | 1 << 7;
 
-        this.next_interrupt += this.periodic_interrupt_time * 
+        this.next_interrupt += this.periodic_interrupt_time *
                 Math.ceil((time - this.next_interrupt) / this.periodic_interrupt_time);
+
+        return Math.max(0, time - this.next_interrupt);
     }
 
-    this.rtc_time += time - this.last_update;
-    this.last_update = time;
+    return 100;
 };
 
 RTC.prototype.bcd_pack = function(n)
-{ 
-    var i = 0, 
+{
+    var i = 0,
         result = 0,
         digit;
-    
+
     while(n)
     {
-        digit = n % 10; 
-        
-        result |= digit << (4 * i); 
-        i++; 
+        digit = n % 10;
+
+        result |= digit << (4 * i);
+        i++;
         n = (n - digit) / 10;
-    } 
-    
+    }
+
     return result;
 };
 
@@ -94,9 +176,9 @@ RTC.prototype.encode_time = function(t)
 // - interrupt on update
 // - countdown
 // - letting bios/os set values
-// (none of these are used by seabios or the OSes we're 
+// (none of these are used by seabios or the OSes we're
 // currently testing)
-RTC.prototype.cmos_read = function()
+RTC.prototype.cmos_port_read = function()
 {
     var index = this.cmos_index;
 
@@ -104,91 +186,57 @@ RTC.prototype.cmos_read = function()
 
     switch(index)
     {
-        case 0:
+        case CMOS_RTC_SECONDS:
             return this.encode_time(new Date(this.rtc_time).getUTCSeconds());
-        case 2:
+        case CMOS_RTC_MINUTES:
             return this.encode_time(new Date(this.rtc_time).getUTCMinutes());
-        case 4:
+        case CMOS_RTC_HOURS:
             // TODO: 12 hour mode
             return this.encode_time(new Date(this.rtc_time).getUTCHours());
-        case 7:
+        case CMOS_RTC_DAY_MONTH:
             return this.encode_time(new Date(this.rtc_time).getUTCDate());
-        case 8:
+        case CMOS_RTC_MONTH:
             return this.encode_time(new Date(this.rtc_time).getUTCMonth() + 1);
-        case 9:
+        case CMOS_RTC_YEAR:
             return this.encode_time(new Date(this.rtc_time).getUTCFullYear() % 100);
 
-        case 0xA:
+        case CMOS_STATUS_A:
             return this.cmos_a;
-        case 0xB:
+        case CMOS_STATUS_B:
             //dbg_log("cmos read from index " + h(index));
             return this.cmos_b;
 
-        case 0xE:
-            // post info
-            return 0;
-        case 0xC:
+        case CMOS_STATUS_C:
             this.cmos_c_was_read = true;
 
             // TODO:
             // It is important to know that upon a IRQ 8, Status Register C
             // will contain a bitmask telling which interrupt happened.
             // What is important is that if register C is not read after an
-            // IRQ 8, then the interrupt will not happen again. 
+            // IRQ 8, then the interrupt will not happen again.
 
             dbg_log("cmos reg C read", LOG_RTC);
             // Missing IRQF flag
             //return cmos_b & 0x70;
+            var c = this.cmos_c;
 
-            return this.cmos_c;
+            this.cmos_c &= ~0xF0;
 
-        case 0xF:
-            return 0;
+            return c;
 
-        case 0x10:
-            // floppy type
-            return this.diskette_type;
+        case CMOS_STATUS_D:
+            return 0xFF;
 
-        case 0x14:
-            // equipment
-            return 0x2D;
-
-        case 0x32:
+        case CMOS_CENTURY:
             return this.encode_time(new Date(this.rtc_time).getUTCFullYear() / 100 | 0);
 
-        case 0x34:
-            return (this.cpu.memory_size - 16 * 1024 * 1024) >> 16 & 0xff;
-        case 0x35:
-            return (this.cpu.memory_size - 16 * 1024 * 1024) >> 24 & 0xff;
-
-
-        case 0x38:
-            // used by seabios to determine the boot order
-            //   Nibble
-            //   1: FloppyPrio 
-            //   2: HDPrio 
-            //   3: CDPrio 
-            //   4: BEVPrio 
-            // bootflag 1, high nibble, lowest priority
-            // Low nibble: Disable floppy signature check (1)
-            return 1 | this.boot_order >> 4 & 0xF0;
-        case 0x3D:
-            // bootflag 2, both nibbles, high and middle priority
-            return this.boot_order & 0xFF; 
-
-        case 0x5B:
-        case 0x5C:
-        case 0x5D:
-            // memory above 4GB
-            return 0;
+        default:
+            dbg_log("cmos read from index " + h(index), LOG_RTC);
+            return this.cmos_data[this.cmos_index];
     }
-
-    dbg_log("cmos read from index " + h(index), LOG_RTC);
-
-    return 0xFF;
 };
 
-RTC.prototype.cmos_write = function(data_byte)
+RTC.prototype.cmos_port_write = function(data_byte)
 {
     switch(this.cmos_index)
     {
@@ -215,4 +263,24 @@ RTC.prototype.cmos_write = function(data_byte)
     }
 
     this.periodic_interrupt = (this.cmos_b & 0x40) === 0x40 && (this.cmos_a & 0xF) > 0;
+};
+
+/**
+ * @param {number} index
+ */
+RTC.prototype.cmos_read = function(index)
+{
+    dbg_assert(index < 128);
+    return this.cmos_data[index];
+};
+
+/**
+ * @param {number} index
+ * @param {number} value
+ */
+RTC.prototype.cmos_write = function(index, value)
+{
+    dbg_log("cmos " + h(index) + " <- " + h(value), LOG_RTC);
+    dbg_assert(index < 128);
+    this.cmos_data[index] = value;
 };

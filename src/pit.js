@@ -1,11 +1,10 @@
 "use strict";
 
-/** 
- * @const 
+/**
+ * @const
  * In kHz
  */
 var OSCILLATOR_FREQ = 1193.1816666; // 1.193182 MHz
-
 
 /**
  * @constructor
@@ -14,9 +13,11 @@ var OSCILLATOR_FREQ = 1193.1816666; // 1.193182 MHz
  */
 function PIT(cpu)
 {
-    this.pic = cpu.devices.pic;
-        
-    this.next_tick = Date.now();
+    /** @const @type {CPU} */
+    this.cpu = cpu;
+
+    this.counter_start_time = new Float64Array(3);
+    this.counter_start_value = new Uint16Array(3);
 
     this.counter_next_low = new Uint8Array(4);
     this.counter_enabled = new Uint8Array(4);
@@ -28,26 +29,18 @@ function PIT(cpu)
     this.counter_latch_value = new Uint16Array(3);
 
     this.counter_reload = new Uint16Array(3);
-    this.counter_current = new Uint16Array(3);
-
-    // only counter2 output can be read
-    this.counter2_out = 0;
-
 
     // TODO:
     // - counter2 can be controlled by an input
 
-    var parity = 0;
-
     cpu.io.register_read(0x61, this, function()
     {
-        // > xxx1 xxxx  0=RAM parity error enable
-        // >            PS/2: Read:  This bit tiggles for each refresh request.
-        // 
-        // tiggles??
-        
-        parity ^= 0x10;
-        return parity | this.counter2_out << 5;
+        var now = v86.microtick();
+
+        var ref_toggle = (now * (1000 * 1000 / 15000)) & 1;
+        var counter2_out = this.did_rollover(2, now);
+
+        return ref_toggle << 4 | counter2_out << 5;
     });
 
     cpu.io.register_read(0x40, this, function() { return this.counter_read(0); });
@@ -59,93 +52,108 @@ function PIT(cpu)
     cpu.io.register_write(0x42, this, function(data) { this.counter_write(2, data); });
 
     cpu.io.register_write(0x43, this, this.port43_write);
-
-    /** @const */
-    this._state_skip = ["pic"];
 }
 
-PIT.prototype.get_timer2 = function()
+PIT.prototype.get_state = function()
 {
-    //dbg_log("timer2 read", LOG_PIT);
-    return this.counter2_out;
+    var state = [];
+
+    state[0] = this.counter_next_low;
+    state[1] = this.counter_enabled;
+    state[2] = this.counter_mode;
+    state[3] = this.counter_read_mode;
+    state[4] = this.counter_latch;
+    state[5] = this.counter_latch_value;
+    state[6] = this.counter_reload;
+    state[7] = this.counter_start_time;
+    state[8] = this.counter_start_value;
+
+    return state;
 };
 
-PIT.prototype.timer = function(time, no_irq)
+PIT.prototype.set_state = function(state)
 {
-    dbg_assert(time >= this.next_tick);
+    this.counter_next_low = state[0];
+    this.counter_enabled = state[1];
+    this.counter_mode = state[2];
+    this.counter_read_mode = state[3];
+    this.counter_latch = state[4];
+    this.counter_latch_value = state[5];
+    this.counter_reload = state[6];
+    this.counter_start_time = state[7];
+    this.counter_start_value = state[8];
+};
 
-    var current,
-        mode,
-        steps = (time - this.next_tick) * OSCILLATOR_FREQ >>> 0;
-
-    if(!steps)
-    {
-        return;
-    }
-
-    this.next_tick += steps / OSCILLATOR_FREQ;
+PIT.prototype.timer = function(now, no_irq)
+{
+    var time_to_next_interrupt = 100;
 
     // counter 0 produces interrupts
     if(!no_irq && this.counter_enabled[0])
     {
-        current = this.counter_current[0] -= steps;
-
-        if(current <= 0)
+        if(this.did_rollover(0, now))
         {
-            this.pic.push_irq(0);
-            mode = this.counter_mode[0];
+            time_to_next_interrupt = 0;
+
+            this.counter_start_value[0] = this.get_counter_value(0, now);
+            this.counter_start_time[0] = now;
+
+            dbg_log("pit interrupt. new value: " + this.counter_start_value[0], LOG_PIT);
+
+            this.cpu.device_raise_irq(0);
+            var mode = this.counter_mode[0];
 
             if(mode === 0)
             {
                 this.counter_enabled[0] = 0;
-                this.counter_current[0] = 0;
-            }
-            else if(mode === 3 || mode === 2)
-            {
-                this.counter_current[0] = this.counter_reload[0] + current % this.counter_reload[0];
             }
         }
     }
+    time_to_next_interrupt = 0;
 
-    // counter 2 has an output bit
-    if(this.counter_enabled[2])
-    {
-        current = this.counter_current[2] -= steps;
-
-        if(current <= 0)
-        {
-            mode = this.counter_mode[2];
-
-            if(mode === 0)
-            {
-                this.counter2_out = 1;
-                this.counter_enabled[2] = 0;
-                this.counter_current[2] = 0;
-            }
-            else if(mode === 2)
-            {
-                this.counter2_out = 1;
-                this.counter_current[2] = this.counter_reload[2] + current % this.counter_reload[2];
-            }
-            else if(mode === 3)
-            {
-                this.counter2_out ^= 1;
-                this.counter_current[2] = this.counter_reload[2] + current % this.counter_reload[2];
-            }
-        }
-        // cannot really happen, because the counter gets changed by big numbers
-        //else if(current === 1)
-        //{
-        //    if(this.counter_mode[2] === 2)
-        //    {
-        //        this.counter2_out = 0;
-        //    }
-        //}
-    }
+    return time_to_next_interrupt;
 };
 
-        
-PIT.prototype.counter_read = function(i) 
+PIT.prototype.get_counter_value = function(i, now)
+{
+    if(!this.counter_enabled[i])
+    {
+        return 0;
+    }
+
+    var diff = now - this.counter_start_time[i];
+    var diff_in_ticks = Math.floor(diff * OSCILLATOR_FREQ);
+
+    var value = this.counter_start_value[i] - diff_in_ticks;
+
+    dbg_log("diff=" + diff + " dticks=" + diff_in_ticks + " value=" + value + " reload=" + this.counter_reload[i], LOG_PIT);
+
+    if(value < 0)
+    {
+        var reload = this.counter_reload[i];
+        value = value % reload + reload;
+    }
+
+    return value;
+};
+
+PIT.prototype.did_rollover = function(i, now)
+{
+    var diff = now - this.counter_start_time[i];
+
+    if(diff < 0)
+    {
+        // should only happen after restore_state
+        dbg_log("Warning: PIT timer difference is negative, resetting");
+        return true;
+    }
+    var diff_in_ticks = Math.floor(diff * OSCILLATOR_FREQ);
+    //dbg_log(i + ": diff=" + diff + " start_time=" + this.counter_start_time[i] + " diff_in_ticks=" + diff_in_ticks + " (" + diff * OSCILLATOR_FREQ + ") start_value=" + this.counter_start_value[i] + " did_rollover=" + (this.counter_start_value[i] < diff_in_ticks), LOG_PIT);
+
+    return this.counter_start_value[i] < diff_in_ticks;
+};
+
+PIT.prototype.counter_read = function(i)
 {
     var latch = this.counter_latch[i];
 
@@ -171,19 +179,21 @@ PIT.prototype.counter_read = function(i)
             this.counter_next_low[i] ^= 1;
         }
 
+        var value = this.get_counter_value(i, v86.microtick());
+
         if(next_low)
         {
-            return this.counter_current[i] & 0xFF;
+            return value & 0xFF;
         }
         else
         {
-            return this.counter_current[i] >> 8;
+            return value >> 8;
         }
     }
 };
-        
-PIT.prototype.counter_write = function(i, value) 
-{ 
+
+PIT.prototype.counter_write = function(i, value)
+{
     if(this.counter_next_low[i])
     {
         this.counter_reload[i] = this.counter_reload[i] & ~0xFF | value;
@@ -200,14 +210,16 @@ PIT.prototype.counter_write = function(i, value)
             this.counter_reload[i] = 0xFFFF;
         }
 
-        // depends on the mode, should actually 
+        // depends on the mode, should actually
         // happen on the first tick
-        this.counter_current[i] = this.counter_reload[i];
+        this.counter_start_value[i] = this.counter_reload[i];
 
         this.counter_enabled[i] = true;
 
-        dbg_log("counter" + i + " reload=" + h(this.counter_reload[i]) + 
-            " tick=" + (this.counter_reload[i] || 0x10000) / OSCILLATOR_FREQ + "ms", LOG_PIT);
+        this.counter_start_time[i] = v86.microtick();
+
+        dbg_log("counter" + i + " reload=" + h(this.counter_reload[i]) +
+                " tick=" + (this.counter_reload[i] || 0x10000) / OSCILLATOR_FREQ + "ms", LOG_PIT);
     }
 
     if(this.counter_read_mode[i] === 3)
@@ -221,8 +233,7 @@ PIT.prototype.port43_write = function(reg_byte)
     var mode = reg_byte >> 1 & 7,
         binary_mode = reg_byte & 1,
         i = reg_byte >> 6 & 3,
-        read_mode = reg_byte >> 4 & 3,
-        next_low;
+        read_mode = reg_byte >> 4 & 3;
 
     if(i === 1)
     {
@@ -239,7 +250,9 @@ PIT.prototype.port43_write = function(reg_byte)
     {
         // latch
         this.counter_latch[i] = 2;
-        this.counter_latch_value[i] = this.counter_current[i];
+        var value = this.get_counter_value(i, v86.microtick());
+        dbg_log("pit latch: " + value, LOG_PIT);
+        this.counter_latch_value[i] = value ? value - 1 : 0
 
         return;
     }
@@ -250,7 +263,7 @@ PIT.prototype.port43_write = function(reg_byte)
         mode &= ~4;
     }
 
-    dbg_log("Control: mode=" + mode + " ctr=" + i + 
+    dbg_log("Control: mode=" + mode + " ctr=" + i +
             " read_mode=" + read_mode + " bcd=" + binary_mode, LOG_PIT);
 
     if(read_mode === 1)
@@ -275,7 +288,7 @@ PIT.prototype.port43_write = function(reg_byte)
     }
     else if(mode === 3 || mode === 2)
     {
-        // what is the difference 
+        // what is the difference
     }
     else
     {
@@ -284,17 +297,4 @@ PIT.prototype.port43_write = function(reg_byte)
 
     this.counter_mode[i] = mode;
     this.counter_read_mode[i] = read_mode;
-
-    if(i === 2)
-    {
-        if(mode === 0)
-        {
-            this.counter2_out = 0;
-        }
-        else
-        {
-            // correct for mode 2 and 3
-            this.counter2_out = 1;
-        }
-    }
 };

@@ -1,7 +1,7 @@
 "use strict";
 
 /** @const */
-var STATE_VERSION = 0;
+var STATE_VERSION = 3;
 
 /** @const */
 var STATE_MAGIC = 0x86768676|0;
@@ -30,70 +30,41 @@ function StateLoadError(msg)
 StateLoadError.prototype = new Error;
 
 
-function save_object(obj, arraybuffers)
+function save_object(obj, saved_buffers)
 {
-    // recursively create a structure that can be json-dumped, pushing
-    // arraybuffers into the second argument
-    
     if(typeof obj !== "object" || obj === null || obj instanceof Array)
     {
         return obj;
     }
 
-    if(obj.constructor === Object)
-    {
-        var keys = Object.keys(obj);
-        var result = {};
-
-        for(var i = 0; i < keys.length; i++)
-        {
-            var key = keys[i];
-            result[key] = save_object(obj[key], arraybuffers);
-        }
-
-        return result;
-    }
+    dbg_assert(obj.constructor !== Object);
 
     if(obj.BYTES_PER_ELEMENT)
     {
         // Uint8Array, etc.
+        var buffer = new Uint8Array(obj.buffer, obj.byteOffset, obj.length * obj.BYTES_PER_ELEMENT);
+
         return {
-            __state_type__: obj.constructor.name,
-            buffer_id: arraybuffers.push(obj.buffer) - 1,
+            "__state_type__": obj.constructor.name,
+            "buffer_id": saved_buffers.push(buffer) - 1,
         };
     }
 
-    if(obj instanceof ArrayBuffer)
+    if(DEBUG && !obj.get_state)
     {
-        return {
-            __state_type__: "ArrayBuffer",
-            buffer_id: arraybuffers.push(obj) - 1,
-        };
+        console.log("Object without get_state: ", obj);
     }
 
-    var skip = Array.setify(obj._state_skip || []);
-    skip["_state_skip"] = true;
+    var state = obj.get_state();
+    var result = [];
 
-    var keys = Object.keys(obj);
-    var result = {};
-
-    for(var i = 0; i < keys.length; i++)
+    for(var i = 0; i < state.length; i++)
     {
-        var key = keys[i];
+        var value = state[i];
 
-        if(skip[key])
-        {
-            continue;
-        }
+        dbg_assert(typeof value !== "function");
 
-        var value = obj[key];
-
-        if(typeof value === "function")
-        {
-            continue;
-        }
-
-        result[key] = save_object(value, arraybuffers);
+        result[i] = save_object(value, saved_buffers);
     }
 
     return result;
@@ -101,51 +72,43 @@ function save_object(obj, arraybuffers)
 
 function restore_object(base, obj, buffers)
 {
-    // recurisvely restore obj into base
-    
-    if(typeof obj !== "object" || obj instanceof Array || obj === null)
+    // recursively restore obj into base
+
+    if(typeof obj !== "object" || obj === null)
     {
         return obj;
     }
 
-    var type = obj.__state_type__;
+    if(base instanceof Array)
+    {
+        return obj;
+    }
+
+    var type = obj["__state_type__"];
 
     if(type === undefined)
     {
-        var keys = Object.keys(obj);
-
         if(DEBUG && base === undefined)
         {
             console.log("Cannot restore (base doesn't exist)", obj);
             dbg_assert(false);
         }
 
-        for(var i = 0; i < keys.length; i++)
+        if(DEBUG && !base.get_state)
         {
-            var key = keys[i];
-            base[key] = restore_object(base[key], obj[key], buffers);
+            console.log("No get_state:", base);
         }
 
-        if(base._state_restore)
+        var current = base.get_state();
+
+        dbg_assert(current.length === obj.length, "Cannot restore: Different number of properties");
+
+        for(var i = 0; i < obj.length; i++)
         {
-            base._state_restore();
+            obj[i] = restore_object(current[i], obj[i], buffers);
         }
 
-        return base;
-    } 
-    else if(type === "ArrayBuffer")
-    {
-        var info = buffers.infos[obj.buffer_id];
-
-        if(base && base.byteLength === info.length)
-        {
-            new Uint8Array(base).set(new Uint8Array(buffers.full, info.offset, info.length));
-        }
-        else
-        {
-            //base = buffers.full.slice(info.offset, info.offset + info.length);
-            dbg_assert(false, base ? "buffer of different size" : "no buffer");
-        }
+        base.set_state(obj);
 
         return base;
     }
@@ -165,16 +128,21 @@ function restore_object(base, obj, buffers)
         var constructor = table[type];
         dbg_assert(constructor, "Unkown type: " + type);
 
-        var info = buffers.infos[obj.buffer_id];
+        var info = buffers.infos[obj["buffer_id"]];
 
+        // restore large buffers by just returning a view on the state blob
+        if(info.length >= 1024 * 1024 && constructor === Uint8Array)
+        {
+            return new Uint8Array(buffers.full, info.offset, info.length);
+        }
         // avoid a new allocation if possible
-        if(base && 
-           base.constructor === constructor && 
-           base.byteOffset === 0 &&
-           base.byteLength === info.length)
+        else if(base &&
+                base.constructor === constructor &&
+                base.byteOffset === 0 &&
+                base.byteLength === info.length)
         {
             new Uint8Array(base.buffer).set(
-                new Uint8Array(buffers.full, info.offset, info.length), 
+                new Uint8Array(buffers.full, info.offset, info.length),
                 base.byteOffset
             );
             return base;
@@ -189,15 +157,15 @@ function restore_object(base, obj, buffers)
 
 CPU.prototype.save_state = function()
 {
-    var arraybuffers = [];
-    var state = save_object(this, arraybuffers);
+    var saved_buffers = [];
+    var state = save_object(this, saved_buffers);
 
     var buffer_infos = [];
     var total_buffer_size = 0;
 
-    for(var i = 0; i < arraybuffers.length; i++)
+    for(var i = 0; i < saved_buffers.length; i++)
     {
-        var len = arraybuffers[i].byteLength;
+        var len = saved_buffers[i].byteLength;
 
         buffer_infos[i] = {
             offset: total_buffer_size,
@@ -211,27 +179,31 @@ CPU.prototype.save_state = function()
     }
 
     var info_object = JSON.stringify({
-        buffer_infos: buffer_infos,
-        state: state,
+        "buffer_infos": buffer_infos,
+        "state": state,
     });
 
     var buffer_block_start = STATE_INFO_BLOCK_START + 2 * info_object.length;
+    buffer_block_start = buffer_block_start + 3 & ~3;
     var total_size = buffer_block_start + total_buffer_size;
+
+    //console.log("State: json_size=" + Math.ceil(buffer_block_start / 1024 / 1024) + "MB " +
+    //               "buffer_size=" + Math.ceil(total_buffer_size / 1024 / 1024) + "MB");
 
     var result = new ArrayBuffer(total_size);
 
     var header_block = new Int32Array(
-        result, 
-        0, 
+        result,
+        0,
         STATE_INFO_BLOCK_START / 4
     );
     var info_block = new Uint16Array(
-        result, 
-        STATE_INFO_BLOCK_START, 
+        result,
+        STATE_INFO_BLOCK_START,
         info_object.length
     );
     var buffer_block = new Uint8Array(
-        result, 
+        result,
         buffer_block_start
     );
 
@@ -245,9 +217,9 @@ CPU.prototype.save_state = function()
         info_block[i] = info_object.charCodeAt(i);
     }
 
-    for(var i = 0; i < arraybuffers.length; i++)
+    for(var i = 0; i < saved_buffers.length; i++)
     {
-        var buffer = arraybuffers[i];
+        var buffer = saved_buffers[i];
         buffer_block.set(new Uint8Array(buffer), buffer_infos[i].offset);
     }
 
@@ -273,7 +245,7 @@ CPU.prototype.restore_state = function(state)
     if(header_block[STATE_INDEX_VERSION] !== STATE_VERSION)
     {
         throw new StateLoadError(
-                "Version mismatch: dump=" + header_block[STATE_INDEX_VERSION] + 
+                "Version mismatch: dump=" + header_block[STATE_INDEX_VERSION] +
                 " we=" + STATE_VERSION);
     }
 
@@ -286,8 +258,8 @@ CPU.prototype.restore_state = function(state)
 
     var info_block_len = header_block[STATE_INDEX_INFO_LEN];
 
-    if(info_block_len < 0 || 
-       info_block_len + 12 >= len || 
+    if(info_block_len < 0 ||
+       info_block_len + 12 >= len ||
        info_block_len % 2)
     {
         throw new StateLoadError("Invalid info block length: " + info_block_len);
@@ -313,8 +285,10 @@ CPU.prototype.restore_state = function(state)
     }
 
     var info_block_obj = JSON.parse(info_block);
+    var state_object = info_block_obj["state"];
+    var buffer_infos = info_block_obj["buffer_infos"];
     var buffer_block_start = STATE_INFO_BLOCK_START + info_block_len;
-    var buffer_infos = info_block_obj.buffer_infos;
+    buffer_block_start = buffer_block_start + 3 & ~3;
 
     for(var i = 0; i < buffer_infos.length; i++)
     {
@@ -326,5 +300,5 @@ CPU.prototype.restore_state = function(state)
         infos: buffer_infos,
     };
 
-    restore_object(this, info_block_obj.state, buffers);
+    restore_object(this, state_object, buffers);
 };

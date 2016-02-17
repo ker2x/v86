@@ -1,10 +1,19 @@
 "use strict";
 
-/** @constructor */
+/**
+ * @constructor
+ *
+ * @param {CPU} cpu
+ */
 function FloppyController(cpu, fda_image, fdb_image)
 {
+    /** @const @type {IO|undefined} */
     this.io = cpu.io;
-    this.pic = cpu.devices.pic;
+
+    /** @const @type {CPU} */
+    this.cpu = cpu;
+
+    /** @const @type {DMA} */
     this.dma = cpu.devices.dma;
 
     this.bytes_expecting = 0;
@@ -18,8 +27,12 @@ function FloppyController(cpu, fda_image, fdb_image)
 
     this.floppy_size = 0;
 
+    /* const */
     this.fda_image = fda_image;
+
+    /* const */
     this.fdb_image = fdb_image;
+
 
     this.status_reg0 = 0;
     this.status_reg1 = 0;
@@ -30,12 +43,19 @@ function FloppyController(cpu, fda_image, fdb_image)
     this.last_head = 0;
     this.last_sector = 1;
 
-
-    this._state_skip = ["io", "pic", "dma", "fda_image", "fdb_image"];
+    // this should actually be write-only ... but people read it anyway
+    this.dor = 0;
 
     if(!fda_image)
     {
-        this.type = 4;
+        // Needed for CD emulation provided by seabios
+        cpu.devices.rtc.cmos_write(CMOS_FLOPPY_DRIVE_TYPE, 4 << 4);
+
+        //this.io.register_read(0x3F4, this, function()
+        //{
+        //    return 0xFF;
+        //});
+
         return;
     }
 
@@ -62,7 +82,7 @@ function FloppyController(cpu, fda_image, fdb_image)
 
     if(floppy_type && (this.floppy_size & 0x3FF) === 0)
     {
-        this.type = floppy_type.type;
+        cpu.devices.rtc.cmos_write(CMOS_FLOPPY_DRIVE_TYPE, floppy_type.type << 4);
 
         sectors_per_track = floppy_type.sectors;
         number_of_heads = floppy_type.heads;
@@ -87,6 +107,56 @@ function FloppyController(cpu, fda_image, fdb_image)
     this.io.register_write(0x3F5, this, this.port3F5_write);
 }
 
+FloppyController.prototype.get_state = function()
+{
+    var state = [];
+
+    state[0] = this.bytes_expecting;
+    state[1] = this.receiving_command;
+    state[2] = this.receiving_index;
+    //state[3] = this.next_command;
+    state[4] = this.response_data;
+    state[5] = this.response_index;
+    state[6] = this.response_length;
+    state[7] = this.floppy_size;
+    state[8] = this.status_reg0;
+    state[9] = this.status_reg1;
+    state[10] = this.status_reg2;
+    state[11] = this.drive;
+    state[12] = this.last_cylinder;
+    state[13] = this.last_head;
+    state[14] = this.last_sector;
+    state[15] = this.dor;
+    state[16] = this.sectors_per_track;
+    state[17] = this.number_of_heads;
+    state[18] = this.number_of_cylinders;
+
+    return state;
+};
+
+FloppyController.prototype.set_state = function(state)
+{
+    this.bytes_expecting = state[0];
+    this.receiving_command = state[1];
+    this.receiving_index = state[2];
+    this.next_command = state[3];
+    this.response_data = state[4];
+    this.response_index = state[5];
+    this.response_length = state[6];
+    this.floppy_size = state[7];
+    this.status_reg0 = state[8];
+    this.status_reg1 = state[9];
+    this.status_reg2 = state[10];
+    this.drive = state[11];
+    this.last_cylinder = state[12];
+    this.last_head = state[13];
+    this.last_sector = state[14];
+    this.dor = state[15];
+    this.sectors_per_track = state[16];
+    this.number_of_heads = state[17];
+    this.number_of_cylinders = state[18];
+};
+
 FloppyController.prototype.port3F0_read = function()
 {
     dbg_log("3F0 read", LOG_DISK);
@@ -106,7 +176,7 @@ FloppyController.prototype.port3F4_read = function()
         return_byte |= 0x40 | 0x10;
     }
 
-    if((dor & 8) === 0)
+    if((this.dor & 8) === 0)
     {
         return_byte |= 0x20;
     }
@@ -149,7 +219,7 @@ FloppyController.prototype.port3F5_write = function(reg_byte)
             if(DEBUG)
             {
                 var log = "3F5 command received: ";
-                for(var i = 0; i < this.receiving_index; i++) 
+                for(var i = 0; i < this.receiving_index; i++)
                     log += h(this.receiving_command[i]) + " ";
                 dbg_log(log, LOG_DISK);
             }
@@ -199,7 +269,7 @@ FloppyController.prototype.port3F5_write = function(reg_byte)
                 this.next_command = this.seek;
                 break;
             case 0x0E:
-                // dump regs 
+                // dump regs
                 dbg_log("dump registers", LOG_DISK);
                 this.response_data[0] = 0x80;
                 this.response_index = 0;
@@ -208,29 +278,25 @@ FloppyController.prototype.port3F5_write = function(reg_byte)
                 this.bytes_expecting = 0;
                 break;
             default:
-                if(DEBUG) throw "unimpl floppy command call " + h(reg_byte);
+                dbg_assert(false, "Unimplemented floppy command call " + h(reg_byte));
         }
 
         this.receiving_index = 0;
     }
 };
 
-
-// this should actually be write-only ... but people read it anyway
-var dor = 0;
-
 FloppyController.prototype.port3F2_read = function()
 {
     dbg_log("read 3F2: DOR", LOG_DISK);
-    return dor;
+    return this.dor;
 }
 
 FloppyController.prototype.port3F2_write = function(value)
 {
-    if((value & 4) === 4 && (dor & 4) === 0)
+    if((value & 4) === 4 && (this.dor & 4) === 0)
     {
         // reset
-        this.pic.push_irq(6);
+        this.cpu.device_raise_irq(6);
     }
 
     dbg_log("start motors: " + h(value >> 4), LOG_DISK);
@@ -239,8 +305,7 @@ FloppyController.prototype.port3F2_write = function(value)
     dbg_log("drive select: " + (value & 3), LOG_DISK);
     dbg_log("DOR = " + h(value), LOG_DISK);
 
-    dor = value;
-
+    this.dor = value;
 }
 
 FloppyController.prototype.check_drive_status = function(args)
@@ -255,24 +320,19 @@ FloppyController.prototype.check_drive_status = function(args)
 FloppyController.prototype.seek = function(args)
 {
     dbg_log("seek", LOG_DISK);
+    dbg_assert((args[0] & 3) === 0, "Unhandled seek drive");
 
     this.last_cylinder = args[1];
     this.last_head = args[0] >> 2 & 1;
-    
-    if(dor & 8)
-    {
-        this.pic.push_irq(6);
-    }
+
+    this.raise_irq();
 }
 
 FloppyController.prototype.calibrate = function(args)
 {
     dbg_log("floppy calibrate", LOG_DISK);
 
-    if(dor & 8)
-    {
-        this.pic.push_irq(6);
-    }
+    this.raise_irq();
 }
 
 FloppyController.prototype.check_interrupt_status = function()
@@ -296,8 +356,8 @@ FloppyController.prototype.do_sector = function(is_write, args)
         read_count = args[5] - args[3] + 1,
 
         read_offset = ((head + this.number_of_heads * cylinder) * this.sectors_per_track + sector - 1) * sector_size;
-    
-    dbg_log("Floppy Read", LOG_DISK);
+
+    dbg_log("Floppy " + (is_write ? "Write" : "Read"), LOG_DISK);
     dbg_log("from " + h(read_offset) + " length " + h(read_count * sector_size), LOG_DISK);
     dbg_log(cylinder + " / " + head + " / " + sector, LOG_DISK);
 
@@ -316,7 +376,7 @@ FloppyController.prototype.do_sector = function(is_write, args)
     }
 };
 
-FloppyController.prototype.done = function(cylinder, args, head, sector, error)
+FloppyController.prototype.done = function(args, cylinder, head, sector, error)
 {
     if(error)
     {
@@ -345,18 +405,15 @@ FloppyController.prototype.done = function(cylinder, args, head, sector, error)
     this.response_index = 0;
     this.response_length = 7;
 
-    this.response_data[0] = head << 2 | 0x20; 
-    this.response_data[1] = 0; 
-    this.response_data[2] = 0; 
-    this.response_data[3] = cylinder; 
-    this.response_data[4] = head; 
-    this.response_data[5] = sector; 
+    this.response_data[0] = head << 2 | 0x20;
+    this.response_data[1] = 0;
+    this.response_data[2] = 0;
+    this.response_data[3] = cylinder;
+    this.response_data[4] = head;
+    this.response_data[5] = sector;
     this.response_data[6] = args[4];
 
-    if(dor & 8)
-    {
-        this.pic.push_irq(6);
-    }
+    this.raise_irq();
 }
 
 FloppyController.prototype.fix_drive_data = function(args)
@@ -379,9 +436,13 @@ FloppyController.prototype.read_sector_id = function(args)
     this.response_data[5] = 0;
     this.response_data[6] = 0;
 
-    if(dor & 8)
-    {
-        this.pic.push_irq(6);
-    }
+    this.raise_irq();
 }
 
+FloppyController.prototype.raise_irq = function()
+{
+    if(this.dor & 8)
+    {
+        this.cpu.device_raise_irq(6);
+    }
+};

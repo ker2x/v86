@@ -1,112 +1,9 @@
 "use strict";
 
-/** 
- * @type {function((string|number), number=)}
- * @const 
- */
-var dbg_log = (function()
-{
-    /** @const */
-    var dbg_names = LOG_NAMES.reduce(function(a, x)
-    {
-        a[x[0]] = x[1];
-        return a;
-    }, {});
-
-    var log_last_message = "";
-    var log_message_repetitions = 0;
-
-    /** 
-     * @param {number=} level
-     */
-    function dbg_log_(stuff, level)
-    {
-        if(!DEBUG) return;
-
-        level = level || 1;
-
-        if(level & LOG_LEVEL)
-        {
-            var level_name = dbg_names[level] || "",
-                message = "[" + String.pads(level_name, 4) + "] " + stuff;
-
-            if(message === log_last_message)
-            {
-                log_message_repetitions++;
-
-                if(log_message_repetitions < 2048)
-                {
-                    return;
-                }
-            }
-
-            var now = new Date();
-            var time_str = String.pad0(now.getHours(), 2) + ":" + 
-                           String.pad0(now.getMinutes(), 2) + ":" + 
-                           String.pad0(now.getSeconds(), 2) + " ";
-
-            if(log_message_repetitions)
-            {
-                if(log_message_repetitions === 1)
-                {
-                    console.log(time_str + log_last_message);
-                }
-                else 
-                {
-                    console.log("Previous message repeated " + log_message_repetitions + " times");
-                }
-
-                log_message_repetitions = 0;
-            }
-
-            console.log(time_str + message);
-
-            log_last_message = message;
-        }
-    }
-
-    return dbg_log_;
-})();
-
-/** 
- * @param {number=} level
- */
-function dbg_trace(level)
-{
-    if(!DEBUG) return;
-
-    dbg_log(Error().stack, level);
-}
-
-/** 
- * console.assert is fucking slow
- * @param {string=} msg
- * @param {number=} level
- */
-function dbg_assert(cond, msg, level) 
-{ 
-    if(!DEBUG) return;
-
-    if(!cond) 
-    { 
-        //dump_regs();
-        console.log(Error().stack);
-        console.trace();
-
-        if(msg)
-        {
-            throw "Assert failed: " + msg;
-        }
-        else
-        {
-            throw "Assert failed";
-        }
-    } 
-};
-
+var v86util = v86util || {};
 
 // pad string with spaces on the right
-String.pads = function(str, len)
+v86util.pads = function(str, len)
 {
     str = str ? str + "" : "";
 
@@ -114,12 +11,12 @@ String.pads = function(str, len)
     {
         str = str + " ";
     }
-    
+
     return str;
 }
 
 // pad string with zeros on the left
-String.pad0 = function(str, len)
+v86util.pad0 = function(str, len)
 {
     str = str ? str + "" : "";
 
@@ -127,7 +24,7 @@ String.pad0 = function(str, len)
     {
         str = "0" + str;
     }
-    
+
     return str;
 }
 
@@ -139,26 +36,19 @@ String.pad0 = function(str, len)
  */
 function h(n, len)
 {
-    //dbg_assert(typeof n === "number");
-
-    if(!n) return String.pad0("", len || 1);
-
-    if(len)
+    if(!n)
     {
-        return String.pad0(n.toString(16).toUpperCase(), len);
+        var str = "";
     }
     else
     {
-        return n.toString(16).toUpperCase();
+        var str = n.toString(16);
     }
+
+    return "0x" + v86util.pad0(str.toUpperCase(), len || 1);
 }
 
-if(typeof window === "object")
-{
-    window["SyncBuffer"] = SyncBuffer;
-}
-
-/** 
+/**
  * Synchronous access to ArrayBuffer
  * @constructor
  */
@@ -166,29 +56,34 @@ function SyncBuffer(buffer)
 {
     this.buffer = buffer;
     this.byteLength = buffer.byteLength;
+    this.onload = undefined;
+    this.onprogress = undefined;
 }
 
-/** 
+SyncBuffer.prototype.load = function()
+{
+    this.onload && this.onload({ buffer: this.buffer });
+};
+
+/**
  * @param {number} start
  * @param {number} len
  * @param {function(!Uint8Array)} fn
  */
 SyncBuffer.prototype.get = function(start, len, fn)
 {
-    // warning: fn may be called synchronously or asynchronously
-    dbg_assert(start + len <= this.buffer.byteLength);
-
+    dbg_assert(start + len <= this.byteLength);
     fn(new Uint8Array(this.buffer, start, len));
 };
 
-/** 
+/**
  * @param {number} start
  * @param {!Uint8Array} slice
  * @param {function()} fn
  */
 SyncBuffer.prototype.set = function(start, slice, fn)
 {
-    dbg_assert(start + slice.length <= this.buffer.byteLength);
+    dbg_assert(start + slice.byteLength <= this.byteLength);
 
     new Uint8Array(this.buffer, start, slice.byteLength).set(slice);
     fn();
@@ -203,97 +98,74 @@ SyncBuffer.prototype.get_buffer = function(fn)
 };
 
 
+
+(function()
+{
+    var int_log2_table = new Int8Array(256);
+
+    for(var i = 0, b = -2; i < 256; i++)
+    {
+        if(!(i & i - 1))
+            b++;
+
+        int_log2_table[i] = b;
+    }
+
+    /**
+     * calculate the integer logarithm base 2 of a byte
+     * @param {number} x
+     * @return {number}
+     */
+    v86util.int_log2_byte = function(x)
+    {
+        dbg_assert(x > 0);
+        dbg_assert(x < 0x100);
+
+        return int_log2_table[x];
+    };
+
+    /**
+     * calculate the integer logarithm base 2
+     * @param {number} x
+     * @return {number}
+     */
+    v86util.int_log2 = function(x)
+    {
+        dbg_assert(x > 0);
+
+        // http://jsperf.com/integer-log2/6
+        var tt = x >>> 16;
+
+        if(tt)
+        {
+            var t = tt >>> 8;
+            if(t)
+            {
+                return 24 + int_log2_table[t];
+            }
+            else
+            {
+                return 16 + int_log2_table[tt];
+            }
+        }
+        else
+        {
+            var t = x >>> 8;
+            if(t)
+            {
+                return 8 + int_log2_table[t];
+            }
+            else
+            {
+                return int_log2_table[x];
+            }
+        }
+    }
+})();
+
+
 /**
- * Simple circular queue for logs
- *
- * @param {number} size
  * @constructor
- */
-function CircularQueue(size)
-{
-    this.data = [];
-    this.index = 0;
-    this.size = size;
-}
-
-CircularQueue.prototype.add = function(item)
-{
-    this.data[this.index] = item;
-    this.index = (this.index + 1) % this.size;
-};
-
-CircularQueue.prototype.toArray = function()
-{
-    return [].slice.call(this.data, this.index).concat([].slice.call(this.data, 0, this.index));
-};
-
-CircularQueue.prototype.clear = function()
-{
-    this.data = [];
-    this.index = 0;
-};
-
-/**
- * @param {Array} new_data
- */
-CircularQueue.prototype.set = function(new_data)
-{
-    this.data = new_data;
-    this.index = 0;
-};
-
-
-var int_log2_table = new Int8Array(256);
-
-for(var i = 0, b = -2; i < 256; i++)
-{
-    if(!(i & i - 1))
-        b++;
-
-    int_log2_table[i] = b;
-}
-
-/**
- * calculate the integer logarithm base 2
- * @param {number} x
- * @return {number}
- */
-Math.int_log2 = function(x)
-{
-    dbg_assert(x > 0);
-
-    // http://jsperf.com/integer-log2/6
-    var tt = x >>> 16;
-
-    if(tt)
-    {
-        var t = tt >>> 8;
-        if(t)
-        {
-            return 24 + int_log2_table[t];
-        }
-        else
-        {
-            return 16 + int_log2_table[tt];
-        }
-    }
-    else
-    {
-        var t = x >>> 8;
-        if(t)
-        {
-            return 8 + int_log2_table[t];
-        }
-        else
-        {
-            return int_log2_table[x];
-        }
-    }
-}
-
-
-/** 
- * @constructor 
  *
  * Queue wrapper around Uint8Array
  * Used by devices such as the PS2 controller
@@ -362,14 +234,42 @@ function ByteQueue(size)
     this.clear();
 }
 
-Array.setify = function(array)
-{
-    var set = {};
 
-    for(var i = 0; i < array.length; i++)
-    {
-        set[array[i]] = true;
-    }
-    
-    return set;
+/**
+ * Simple circular queue for logs
+ *
+ * @param {number} size
+ * @constructor
+ */
+function CircularQueue(size)
+{
+    this.data = [];
+    this.index = 0;
+    this.size = size;
+}
+
+CircularQueue.prototype.add = function(item)
+{
+    this.data[this.index] = item;
+    this.index = (this.index + 1) % this.size;
+};
+
+CircularQueue.prototype.toArray = function()
+{
+    return [].slice.call(this.data, this.index).concat([].slice.call(this.data, 0, this.index));
+};
+
+CircularQueue.prototype.clear = function()
+{
+    this.data = [];
+    this.index = 0;
+};
+
+/**
+ * @param {Array} new_data
+ */
+CircularQueue.prototype.set = function(new_data)
+{
+    this.data = new_data;
+    this.index = 0;
 };

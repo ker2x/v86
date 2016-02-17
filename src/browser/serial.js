@@ -2,56 +2,78 @@
 
 /**
  * @constructor
+ *
+ * @param {BusConnector} bus
  */
 function SerialAdapter(element, bus)
 {
     var serial = this;
 
     this.enabled = true;
-    this.bus = undefined;
+    this.bus = bus;
+    this.text = [];
+    this.text_changed = false;
+    this.text_new_line = false;
 
-    this.destroy = function() 
+
+    this.bus.register("serial0-output-char", function(chr)
+    {
+        this.show_char(chr);
+    }, this);
+
+
+    this.destroy = function()
     {
         element.removeEventListener("keypress", keypress_handler, false);
         element.removeEventListener("keydown", keydown_handler, false);
         element.removeEventListener("paste", paste_handler, false);
     };
 
-    this.register = function(bus)
+    this.init = function()
     {
         this.destroy();
-        this.bus = bus;
-
-        bus.register("serial0-output", function(chr)
-        {
-            this.show_char(chr);
-        }, this);
 
         element.addEventListener("keypress", keypress_handler, false);
         element.addEventListener("keydown", keydown_handler, false);
         element.addEventListener("paste", paste_handler, false);
+
+        setInterval(function()
+        {
+            if(this.text_changed)
+            {
+                this.text_changed = false;
+                element.value = this.text.join("");
+
+                if(this.text_new_line)
+                {
+                    this.text_new_line = false;
+                    element.scrollTop = 1e9;
+                }
+            }
+        }.bind(this), 16);
     };
-    this.register(bus);
+    this.init();
 
 
     this.show_char = function(chr)
     {
         if(chr === "\x08")
         {
-            var text = element.value;
-            element.value = text.substr(0, text.length - 1);
+            this.text.pop();
+            this.text_changed = true;
         }
         else if(chr === "\r")
         {
-            // do nothing 
+            // do nothing
         }
         else
         {
-            element.value += chr;
+            this.text_changed = true;
+            this.text.push(chr);
 
             if(chr === "\n")
             {
-                element.scrollTop = 1e9;
+                this.text_new_line = true;
             }
         }
     };
@@ -90,7 +112,7 @@ function SerialAdapter(element, bus)
             return;
         }
 
-        var chr = e.keyCode;
+        var chr = e.which;
 
         serial.send_char(chr);
         e.preventDefault();
@@ -98,7 +120,7 @@ function SerialAdapter(element, bus)
 
     function keydown_handler(e)
     {
-        var chr = e.keyCode;
+        var chr = e.which;
 
         if(chr === 8)
         {
@@ -110,8 +132,12 @@ function SerialAdapter(element, bus)
 
     function paste_handler(e)
     {
-        //console.log(e.clipboardData.getData('text/plain'));
-        var data = e.clipboardData.getData('text/plain');
+        if(!may_handle(e))
+        {
+            return;
+        }
+
+        var data = e.clipboardData.getData("text/plain");
 
         for(var i = 0; i < data.length; i++)
         {

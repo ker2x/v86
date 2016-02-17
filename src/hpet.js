@@ -13,13 +13,12 @@ var HPET_ADDR = 0xFED00000,
  * HPET - High Precision Event Timer
  * http://wiki.osdev.org/HPET
  *
- * @constructor 
+ * @constructor
+ * @param {CPU} cpu
  */
 function HPET(cpu)
 {
     var me = this,
-        io = cpu.io,
-        dev = cpu.devices,
 
         hpet_enabled = false,
         hpet_start = Date.now(),
@@ -32,9 +31,9 @@ function HPET(cpu)
 
         counter_config = new Int32Array(HPET_NUM_COUNTERS << 1),
         counter_comparator = new Int32Array(HPET_NUM_COUNTERS << 1),
-        counter_accumulator = new Int32Array(HPET_NUM_COUNTERS << 1),
+        counter_accumulator = new Int32Array(HPET_NUM_COUNTERS << 1);
 
-        counter_last_irq = new Int32Array(HPET_NUM_COUNTERS << 1);
+    //var counter_last_irq = new Int32Array(HPET_NUM_COUNTERS << 1);
 
 
     var last_check = 0;
@@ -49,10 +48,10 @@ function HPET(cpu)
             return;
         }
 
-        var 
+        var
             counter_value = get_counter() >>> 0,
             config,
-            last_irq,
+            //last_irq,
             comparator,
             do_irq;
 
@@ -62,7 +61,7 @@ function HPET(cpu)
             //last_irq = counter_last_irq[i << 1] >>> 0;
             comparator = counter_comparator[i << 1] >>> 0;
 
-            if(last_check <= counter_value ? 
+            if(last_check <= counter_value ?
                     comparator > last_check && comparator <= counter_value :
                     comparator > last_check || comparator <= counter_value
             ) {
@@ -92,16 +91,16 @@ function HPET(cpu)
                 {
                     if(me.legacy_mode && i === 0)
                     {
-                        dev.pic.push_irq(0);
+                        cpu.device_raise_irq(0);
                     }
                     else if(me.legacy_mode && i === 1)
                     {
-                        dev.pic.push_irq(8);
+                        cpu.device_raise_irq(0);
                     }
                     else
                     {
                         // TODO
-                        dev.pic.push_irq(0);
+                        cpu.device_raise_irq(0);
                     }
                 }
             }
@@ -142,9 +141,9 @@ function HPET(cpu)
     }
 
     cpu.io.mmap_register(HPET_ADDR, 0x4000, mmio_read, mmio_write);
-            
-            
-            
+
+
+
     function mmio_read(addr)
     {
         dbg_log("Read " + h(addr, 4) + " (ctr=" + h(get_counter() >>> 0) + ")", LOG_HPET);
@@ -152,7 +151,7 @@ function HPET(cpu)
         switch(addr)
         {
             case 0:
-                return 1 << 16 | HPET_NUM_COUNTERS - 1 << 8 | 0x8000 | 0x01 | HPET_SUPPORT_64 << 13; 
+                return 1 << 16 | HPET_NUM_COUNTERS - 1 << 8 | 0x8000 | 0x01 | HPET_SUPPORT_64 << 13;
             case 4:
                 return HPET_PERIOD;
 
@@ -176,7 +175,7 @@ function HPET(cpu)
             return 0;
         }
 
-        dbg_log("Read counter: addr=" + h(addr) + " counter=" + h(counter, 2) + 
+        dbg_log("Read counter: addr=" + h(addr) + " counter=" + h(counter, 2) +
                 " reg=" + h(register), LOG_HPET);
 
         switch(register)
@@ -251,7 +250,7 @@ function HPET(cpu)
             return;
         }
 
-        dbg_log("Write counter: addr=" + h(addr) + " counter=" + h(counter, 2) + 
+        dbg_log("Write counter: addr=" + h(addr) + " counter=" + h(counter, 2) +
                 " reg=" + h(register) + " data=" + h(data, 2), LOG_HPET);
 
         switch(register)

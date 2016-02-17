@@ -1,7 +1,11 @@
 "use strict";
 
-/** @constructor */
-function MouseAdapter(bus)
+/**
+ * @constructor
+ *
+ * @param {BusConnector} bus
+ */
+function MouseAdapter(bus, screen_container)
 {
     /** @const */
     var SPEED_FACTOR = 0.15;
@@ -21,37 +25,103 @@ function MouseAdapter(bus)
     // set by emulator
     this.emu_enabled = true;
 
-    this.bus = undefined;
+    this.bus = bus;
+
+    this.bus.register("mouse-enable", function(enabled)
+    {
+        this.enabled = enabled;
+    }, this);
 
     this.destroy = function()
     {
+        window.removeEventListener("touchstart", touch_start_handler, false);
+        window.removeEventListener("touchend", touch_end_handler, false);
+        window.removeEventListener("touchmove", mousemove_handler, false);
         window.removeEventListener("mousemove", mousemove_handler, false);
         document.removeEventListener("contextmenu", contextmenu_handler, false);
         window.removeEventListener("mousedown", mousedown_handler, false);
         window.removeEventListener("mouseup", mouseup_handler, false);
+        window.removeEventListener("DOMMouseScroll", mousewheel_handler, false);
+        window.removeEventListener("mousewheel", mousewheel_handler, false);
     };
 
-    this.register = function(bus)
+    this.init = function()
     {
+        if(typeof window === "undefined")
+        {
+            return;
+        }
         this.destroy();
-        this.bus = bus;
 
+        window.addEventListener("touchstart", touch_start_handler, false);
+        window.addEventListener("touchend", touch_end_handler, false);
+        window.addEventListener("touchmove", mousemove_handler, false);
         window.addEventListener("mousemove", mousemove_handler, false);
         document.addEventListener("contextmenu", contextmenu_handler, false);
         window.addEventListener("mousedown", mousedown_handler, false);
         window.addEventListener("mouseup", mouseup_handler, false);
-
-        bus.register("mouse-enable", function(enabled)
-        {
-            this.enabled = enabled;
-        }, this);
+        window.addEventListener("DOMMouseScroll", mousewheel_handler, false);
+        window.addEventListener("mousewheel", mousewheel_handler, false);
     };
-    this.register(bus);
+    this.init();
+
+    function is_child(child, parent)
+    {
+        while(child.parentNode)
+        {
+            if(child === parent)
+            {
+                return true;
+            }
+            child = child.parentNode;
+        }
+
+        return false;
+    }
 
     function may_handle(e)
     {
-        return mouse.enabled && mouse.emu_enabled && 
-            (!e.target || e.type === "mousemove" || (e.target.nodeName !== "INPUT" && e.target.nodeName !== "TEXTAREA"));
+        if(!mouse.enabled || !mouse.emu_enabled)
+        {
+            return false;
+        }
+
+        if(e.type === "mousemove" || e.type === "touchmove")
+        {
+            return true;
+        }
+
+        if(e.type === "mousewheel" || e.type === "DOMMouseScroll")
+        {
+            var parent = screen_container || document.body;
+            return is_child(e.target, parent);
+        }
+
+        return !e.target || e.target.nodeName !== "INPUT" && e.target.nodeName !== "TEXTAREA";
+    }
+
+    function touch_start_handler(e)
+    {
+        if(may_handle(e))
+        {
+            var touches = e["changedTouches"];
+
+            if(touches && touches.length)
+            {
+                var touch = touches[touches.length - 1];
+                last_x = touch.clientX;
+                last_y = touch.clientY;
+            }
+        }
+    }
+
+    function touch_end_handler(e)
+    {
+        if(left_down || middle_down || right_down)
+        {
+            mouse.bus.send("mouse-click", [false, false, false]);
+            left_down = middle_down = right_down = false;
+        }
     }
 
     function mousemove_handler(e)
@@ -66,21 +136,51 @@ function MouseAdapter(bus)
             return;
         }
 
-        var delta_x, delta_y;
+        var delta_x = 0;
+        var delta_y = 0;
 
-        if(true)
+        var touches = e["changedTouches"];
+
+        if(touches)
         {
-            delta_x = e["webkitMovementX"] || e["mozMovementX"] || 0;
-            delta_y = e["webkitMovementY"] || e["mozMovementY"] || 0;
+            if(touches.length)
+            {
+                var touch = touches[touches.length - 1];
+                delta_x = touch.clientX - last_x;
+                delta_y = touch.clientY - last_y;
+
+                last_x = touch.clientX;
+                last_y = touch.clientY;
+
+                e.preventDefault();
+            }
         }
         else
         {
-            // Fallback for other browsers?
-            delta_x = e.clientX - last_x;
-            delta_y = e.clientY - last_y;
+            if(typeof e["movementX"] === "number")
+            {
+                delta_x = e["movementX"];
+                delta_y = e["movementY"];
+            }
+            else if(typeof e["webkitMovementX"] === "number")
+            {
+                delta_x = e["webkitMovementX"];
+                delta_y = e["webkitMovementY"];
+            }
+            else if(typeof e["mozMovementX"] === "number")
+            {
+                delta_x = e["mozMovementX"];
+                delta_y = e["mozMovementY"];
+            }
+            else
+            {
+                // Fallback for other browsers?
+                delta_x = e.clientX - last_x;
+                delta_y = e.clientY - last_y;
 
-            last_x = e.clientX;
-            last_y = e.clientY;
+                last_x = e.clientX;
+                last_y = e.clientY;
+            }
         }
 
         if(SPEED_FACTOR !== 1)
@@ -148,6 +248,29 @@ function MouseAdapter(bus)
         }
         mouse.bus.send("mouse-click", [left_down, middle_down, right_down]);
 
+        e.preventDefault();
+    }
+
+    function mousewheel_handler(e)
+    {
+        if(!may_handle(e))
+        {
+            return;
+        }
+
+        var delta_x = e.wheelDelta || -e.detail;
+        var delta_y = 0;
+
+        if(delta_x < 0)
+        {
+            delta_x = -1;
+        }
+        else if(delta_x > 0)
+        {
+            delta_x = 1;
+        }
+
+        mouse.bus.send("mouse-wheel", [delta_x, delta_y]);
         e.preventDefault();
     }
 }

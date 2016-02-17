@@ -1,18 +1,21 @@
 "use strict";
 
 /**
- * An ethernet-through-websocket adapter, to be used with 
+ * An ethernet-through-websocket adapter, to be used with
  *     https://github.com/benjamincburns/websockproxy
- * 
+ *
  * emulated ethernet card <--> this <--> websocket proxy <--> network
  *
  * @constructor
+ *
+ * @param {string} url
+ * @param {BusConnector} bus
  */
 function NetworkAdapter(url, bus)
 {
     this.send_data = function(x) {};
 
-    this.bus = undefined;
+    this.bus = bus;
     this.socket = undefined;
     this.send_queue = [];
     this.url = url;
@@ -21,7 +24,10 @@ function NetworkAdapter(url, bus)
     this.last_connect_attempt = Date.now() - this.reconnect_interval;
     this.send_queue_limit = 64;
 
-    this.register(bus);
+    this.bus.register("net0-send", function(data)
+    {
+        this.send(data);
+    }, this);
 }
 
 NetworkAdapter.prototype.handle_message = function(e)
@@ -57,16 +63,7 @@ NetworkAdapter.prototype.handle_error = function(e)
     //console.log("onerror", e);
 };
 
-NetworkAdapter.prototype.register = function(bus)
-{
-    this.bus = bus;
-    this.bus.register("net0-send", function(data)
-    {
-        this.send(data);
-    }, this);
-};
-
-NetworkAdapter.prototype.destroy = function() 
+NetworkAdapter.prototype.destroy = function()
 {
     if(this.socket)
     {
@@ -96,7 +93,15 @@ NetworkAdapter.prototype.connect = function()
 
     this.last_connect_attempt = Date.now();
 
-    this.socket = new WebSocket(this.url);
+    try
+    {
+        this.socket = new WebSocket(this.url);
+    }
+    catch(e)
+    {
+        this.handle_close(undefined);
+    }
+
     this.socket.binaryType = "arraybuffer";
 
     this.socket.onopen = this.handle_open.bind(this);;

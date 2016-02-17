@@ -21,16 +21,21 @@ var DLAB = 0x80;
 /** @const */var UART_IIR_CTI = 0x0c; /* Character timeout */
 
 
-/** 
- * @constructor 
+/**
+ * @constructor
+ * @param {CPU} cpu
+ * @param {number} port
+ * @param {BusConnector} bus
  */
 function UART(cpu, port, bus)
 {
+    /** @const @type {BusConnector} */
     this.bus = bus;
 
-    this.pic = cpu.devices.pic;
+    /** @const @type {CPU} */
+    this.cpu = cpu;
 
-    this.interrupts = 0;
+    this.ints = 0;
 
     this.baud_rate = 0;
 
@@ -38,7 +43,6 @@ function UART(cpu, port, bus)
     this.line_status = 0;
 
     this.fifo_control = 0;
-
 
     // interrupts enable
     this.ier = 0;
@@ -54,6 +58,8 @@ function UART(cpu, port, bus)
     this.irq = 0;
 
     this.input = new ByteQueue(4096);
+
+    this.current_line = [];
 
     if(port === 0x3E8 || port === 0x3F8)
     {
@@ -76,7 +82,7 @@ function UART(cpu, port, bus)
 
     var io = cpu.io;
 
-    io.register_write(port, this, function(out_byte) 
+    io.register_write(port, this, function(out_byte)
     {
         if(this.line_control & DLAB)
         {
@@ -86,17 +92,24 @@ function UART(cpu, port, bus)
 
         dbg_log("data: " + h(out_byte), LOG_SERIAL);
 
-        if(this.ier & UART_IER_THRI)
-        {
-            this.push_irq();
-        }
+        this.ThrowTHRI();
 
         if(out_byte === 0xFF)
         {
             return;
         }
 
-        this.bus.send("serial0-output", String.fromCharCode(out_byte));
+        var char = String.fromCharCode(out_byte);
+
+        this.bus.send("serial0-output-char", char);
+
+        this.current_line.push(out_byte);
+
+        if(char === "\n")
+        {
+            this.bus.send("serial0-output-line", String.fromCharCode.apply("", this.current_line));
+            this.current_line = [];
+        }
     });
 
     io.register_write(port | 1, this, function(out_byte)
@@ -110,6 +123,7 @@ function UART(cpu, port, bus)
         {
             this.ier = out_byte;
             dbg_log("interrupt enable: " + h(out_byte), LOG_SERIAL);
+            this.NextInterrupt();
         }
     });
 
@@ -130,6 +144,11 @@ function UART(cpu, port, bus)
             else
             {
                 dbg_log("Read input: " + h(data), LOG_SERIAL);
+            }
+
+            if(this.input.length)
+            {
+                this.ThrowCTI();
             }
 
             return data;
@@ -155,11 +174,11 @@ function UART(cpu, port, bus)
 
         if(this.iir === UART_IIR_THRI)
         {
-            this.clear_interrupt(UART_IIR_THRI);
+            this.ClearInterrupt(UART_IIR_THRI);
         }
         else if(this.iir === UART_IIR_CTI)
         {
-            this.clear_interrupt(UART_IIR_CTI);
+            this.ClearInterrupt(UART_IIR_CTI);
         }
 
         return ret;
@@ -229,36 +248,88 @@ function UART(cpu, port, bus)
     {
         this.scratch_register = out_byte;
     });
-
-    this._state_skip = [
-        "bus",
-    ];
 }
+
+UART.prototype.get_state = function()
+{
+    var state = [];
+
+    state[0] = this.ints;
+    state[1] = this.baud_rate;
+    state[2] = this.line_control;
+    state[3] = this.line_status;
+    state[4] = this.fifo_control;
+    state[5] = this.ier;
+    state[6] = this.iir;
+    state[7] = this.modem_control;
+    state[8] = this.modem_status;
+    state[9] = this.scratch_register;
+    state[10] = this.irq;
+
+    return state;
+};
+
+UART.prototype.set_state = function(state)
+{
+    this.ints = state[0];
+    this.baud_rate = state[1];
+    this.line_control = state[2];
+    this.line_status = state[3];
+    this.fifo_control = state[4];
+    this.ier = state[5];
+    this.iir = state[6];
+    this.modem_control = state[7];
+    this.modem_status = state[8];
+    this.scratch_register = state[9];
+    this.irq = state[10];
+};
 
 UART.prototype.push_irq = function()
 {
     dbg_log("Push irq", LOG_SERIAL);
-    this.pic.push_irq(this.irq);
+    this.cpu.device_raise_irq(this.irq);
 };
 
-UART.prototype.clear_interrupt = function(line)
+UART.prototype.ClearInterrupt = function(line)
 {
-    this.interrupts &= ~(1 << line);
+    this.ints &= ~(1 << line);
     this.iir = UART_IIR_NO_INT;
 
-    if(line === this.iir) 
+    if(line === this.iir)
     {
-        this.next_interrupt();
+        this.NextInterrupt();
     }
 };
 
-UART.prototype.next_interrupt = function()
-{
-    if ((this.interrupts & (1 << UART_IIR_CTI)) && (this.ier & UART_IER_RDI)) {
-        //this.ThrowCTI();
+UART.prototype.ThrowCTI = function() {
+    this.ints |= 1 << UART_IIR_CTI;
+    if (!(this.ier & UART_IER_RDI)) {
+        return;
     }
-    else if ((this.interrupts & (1 << UART_IIR_THRI)) && (this.ier & UART_IER_THRI)) {
-        //this.ThrowTHRI();
+    if ((this.iir != UART_IIR_RLSI) && (this.iir != UART_IIR_RDI)) {
+        this.iir = UART_IIR_CTI;
+        this.push_irq();
+    }
+};
+
+
+UART.prototype.ThrowTHRI = function() {
+    this.ints |= 1 << UART_IIR_THRI;
+    if (!(this.ier & UART_IER_THRI)) {
+        return;
+    }
+    if ((this.iir & UART_IIR_NO_INT) || (this.iir == UART_IIR_MSI) || (this.iir == UART_IIR_THRI)) {
+        this.iir = UART_IIR_THRI;
+        this.push_irq();
+    }
+};
+
+UART.prototype.NextInterrupt = function() {
+    if ((this.ints & (1 << UART_IIR_CTI)) && (this.ier & UART_IER_RDI)) {
+        this.ThrowCTI();
+    }
+    else if ((this.ints & (1 << UART_IIR_THRI)) && (this.ier & UART_IER_THRI)) {
+        this.ThrowTHRI();
     }
     else {
         this.iir = UART_IIR_NO_INT;
@@ -266,18 +337,18 @@ UART.prototype.next_interrupt = function()
     }
 };
 
-/** 
+
+/**
  * @param {number} data
  */
 UART.prototype.data_received = function(data)
 {
     dbg_log("input: " + h(data), LOG_SERIAL);
     this.input.push(data);
-    this.interrupts |= 1 << UART_IIR_CTI;
+    this.ints |= 1 << UART_IIR_CTI;
 
     if(this.ier & UART_IER_RDI)
     {
-        this.iir = UART_IIR_CTI;
-        this.push_irq();
+        this.ThrowCTI();
     }
 };

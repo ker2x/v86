@@ -2,18 +2,22 @@
 
 /**
  * @constructor
+ * @param {CPU} cpu
+ * @param {BusConnector} bus
  */
 function PS2(cpu, bus)
 {
-    this.pic = cpu.devices.pic;
+    /** @const @type {CPU} */
     this.cpu = cpu;
 
+    /** @const @type {BusConnector} */
     this.bus = bus;
 
     /** @type {boolean} */
     this.enable_mouse_stream = false;
+
     /** @type {boolean} */
-    this.enable_mouse = false;
+    this.use_mouse = false;
 
     /** @type {boolean} */
     this.have_mouse = true;
@@ -49,10 +53,10 @@ function PS2(cpu, bus)
     /** @type {boolean} */
     this.next_read_resolution = false;
 
-    /** 
-     * @type {ByteQueue} 
+    /**
+     * @type {ByteQueue}
      */
-    this.kbd_buffer = new ByteQueue(32);
+    this.kbd_buffer = new ByteQueue(1024);
 
     this.last_port60_byte = 0;
 
@@ -68,10 +72,10 @@ function PS2(cpu, bus)
     /** @type {number} */
     this.last_mouse_packet = -1;
 
-    /** 
-     * @type {ByteQueue} 
+    /**
+     * @type {ByteQueue}
      */
-    this.mouse_buffer = new ByteQueue(32);
+    this.mouse_buffer = new ByteQueue(1024);
 
 
     this.bus.register("keyboard-code", function(code)
@@ -104,21 +108,73 @@ function PS2(cpu, bus)
 
     cpu.io.register_write(0x60, this, this.port60_write);
     cpu.io.register_write(0x64, this, this.port64_write);
-
-    /** @const */
-    this._state_skip = [
-        "bus",
-        "pic", 
-        "cpu",
-    ];
 }
 
+PS2.prototype.get_state = function()
+{
+    var state = [];
+
+    state[0] = this.enable_mouse_stream;
+    state[1] = this.use_mouse;
+    state[2] = this.have_mouse;
+    state[3] = this.mouse_delta_x;
+    state[4] = this.mouse_delta_y;
+    state[5] = this.mouse_clicks;
+    state[6] = this.have_keyboard;
+    state[7] = this.enable_keyboard_stream;
+    state[8] = this.next_is_mouse_command;
+    state[9] = this.next_read_sample;
+    state[10] = this.next_read_led;
+    state[11] = this.next_handle_scan_code_set;
+    state[12] = this.next_read_rate;
+    state[13] = this.next_read_resolution;
+    //state[14] = this.kbd_buffer;
+    state[15] = this.last_port60_byte;
+    state[16] = this.sample_rate;
+    state[17] = this.resolution;
+    state[18] = this.scaling2;
+    //state[19] = this.mouse_buffer;
+    state[20] = this.command_register;
+    state[21] = this.read_output_register;
+    state[22] = this.read_command_register;
+
+    return state;
+};
+
+PS2.prototype.set_state = function(state)
+{
+    this.enable_mouse_stream = state[0];
+    this.use_mouse = state[1];
+    this.have_mouse = state[2];
+    this.mouse_delta_x = state[3];
+    this.mouse_delta_y = state[4];
+    this.mouse_clicks = state[5];
+    this.have_keyboard = state[6];
+    this.enable_keyboard_stream = state[7];
+    this.next_is_mouse_command = state[8];
+    this.next_read_sample = state[9];
+    this.next_read_led = state[10];
+    this.next_handle_scan_code_set = state[11];
+    this.next_read_rate = state[12];
+    this.next_read_resolution = state[13];
+    //this.kbd_buffer = state[14];
+    this.last_port60_byte = state[15];
+    this.sample_rate = state[16];
+    this.resolution = state[17];
+    this.scaling2 = state[18];
+    //this.mouse_buffer = state[19];
+    this.command_register = state[20];
+    this.read_output_register = state[21];
+    this.read_command_register = state[22];
+
+    this.bus.send("mouse-enable", this.use_mouse);
+}
 
 PS2.prototype.mouse_irq = function()
 {
     if(this.command_register & 2)
     {
-        this.pic.push_irq(12);
+        this.cpu.device_raise_irq(12);
     }
 }
 
@@ -126,7 +182,7 @@ PS2.prototype.kbd_irq = function()
 {
     if(this.command_register & 1)
     {
-        this.pic.push_irq(1);
+        this.cpu.device_raise_irq(1);
     }
 }
 
@@ -141,13 +197,13 @@ PS2.prototype.kbd_send_code = function(code)
 
 PS2.prototype.mouse_send_delta = function(delta_x, delta_y)
 {
-    if(!this.have_mouse || !this.enable_mouse)
+    if(!this.have_mouse || !this.use_mouse)
     {
         return;
     }
 
     // note: delta_x or delta_y can be floating point numbers
-    
+
     var factor = this.resolution * this.sample_rate / 80;
 
     this.mouse_delta_x += delta_x * factor;
@@ -162,11 +218,11 @@ PS2.prototype.mouse_send_delta = function(delta_x, delta_y)
         {
             var now = Date.now();
 
-            if(now - this.last_mouse_packet < 1000 / this.sample_rate)
-            {
-                // TODO: set timeout
-                return;
-            }
+            //if(now - this.last_mouse_packet < 1000 / this.sample_rate)
+            //{
+            //    // TODO: set timeout
+            //    return;
+            //}
 
             this.mouse_delta_x -= change_x;
             this.mouse_delta_y -= change_y;
@@ -178,7 +234,7 @@ PS2.prototype.mouse_send_delta = function(delta_x, delta_y)
 
 PS2.prototype.mouse_send_click = function(left, middle, right)
 {
-    if(!this.have_mouse || !this.enable_mouse)
+    if(!this.have_mouse || !this.use_mouse)
     {
         return;
     }
@@ -193,10 +249,10 @@ PS2.prototype.mouse_send_click = function(left, middle, right)
 
 PS2.prototype.send_mouse_packet = function(dx, dy)
 {
-    var info_byte = 
+    var info_byte =
             (dy < 0) << 5 |
             (dx < 0) << 4 |
-            1 << 3 | 
+            1 << 3 |
             this.mouse_clicks,
         delta_x = dx,
         delta_y = dy;
@@ -214,7 +270,7 @@ PS2.prototype.send_mouse_packet = function(dx, dy)
     this.mouse_buffer.push(delta_x);
     this.mouse_buffer.push(delta_y);
 
-    dbg_log("adding mouse packets:" + [info_byte, dx, dy], LOG_PS2);
+    dbg_log("adding mouse packets: " + [info_byte, dx, dy], LOG_PS2);
 
     this.mouse_irq();
 }
@@ -233,7 +289,7 @@ PS2.prototype.apply_scaling2 = function(n)
             return n;
         case 2:
             return sign;
-        case 4: 
+        case 4:
             return 6 * sign;
         case 5:
             return 9 * sign;
@@ -254,7 +310,11 @@ PS2.prototype.destroy = function()
     //    this.mouse.destroy();
     //}
 };
-    
+
+PS2.prototype.next_byte_is_aux = function()
+{
+    return this.mouse_buffer.length && !this.kbd_buffer.length;
+};
 
 PS2.prototype.port60_read = function()
 {
@@ -267,22 +327,7 @@ PS2.prototype.port60_read = function()
         return this.last_port60_byte;
     }
 
-    var do_mouse_buffer;
-
-    if(this.kbd_buffer.length && this.mouse_buffer.length)
-    {
-        // tough decision, let's ask the PIC
-        do_mouse_buffer = (this.pic.get_isr() & 2) === 0;
-        //do_mouse_buffer = false;
-    }
-    else if(this.kbd_buffer.length)
-    {
-        do_mouse_buffer = false;
-    }
-    else
-    {
-        do_mouse_buffer = true;
-    }
+    var do_mouse_buffer = this.next_byte_is_aux();
 
     if(do_mouse_buffer)
     {
@@ -310,7 +355,7 @@ PS2.prototype.port60_read = function()
 
 PS2.prototype.port64_read = function()
 {
-    // status port 
+    // status port
 
     var status_byte = 0x10;
 
@@ -318,7 +363,7 @@ PS2.prototype.port64_read = function()
     {
         status_byte |= 1;
     }
-    if(this.mouse_buffer.length)
+    if(this.next_byte_is_aux())
     {
         status_byte |= 0x20;
     }
@@ -331,14 +376,14 @@ PS2.prototype.port64_read = function()
 PS2.prototype.port60_write = function(write_byte)
 {
     dbg_log("port 60 write: " + h(write_byte), LOG_PS2);
-    
+
     if(this.read_command_register)
     {
         this.kbd_irq();
         this.command_register = write_byte;
         this.read_command_register = false;
         // not sure, causes "spurious ack" in Linux
-        //this.kbd_buffer.push(0xFA); 
+        //this.kbd_buffer.push(0xFA);
 
         dbg_log("Keyboard command register = " + h(this.command_register), LOG_PS2);
     }
@@ -411,7 +456,7 @@ PS2.prototype.port60_write = function(write_byte)
     else if(this.next_is_mouse_command)
     {
         this.next_is_mouse_command = false;
-        dbg_log("Port 60 data register write: " + h(write_byte), LOG_PS2); 
+        dbg_log("Port 60 data register write: " + h(write_byte), LOG_PS2);
 
         if(!this.have_mouse)
         {
@@ -461,7 +506,7 @@ PS2.prototype.port60_write = function(write_byte)
         case 0xF4:
             // enable streaming
             this.enable_mouse_stream = true;
-            this.enable_mouse = true;
+            this.use_mouse = true;
             this.bus.send("mouse-enable", true);
 
             this.mouse_clicks = this.mouse_delta_x = this.mouse_delta_y = 0;
@@ -471,7 +516,7 @@ PS2.prototype.port60_write = function(write_byte)
             this.enable_mouse_stream = false;
             break;
         case 0xF6:
-            // set defaults 
+            // set defaults
             this.enable_mouse_stream = false;
             this.sample_rate = 100;
             this.scaling2 = false;
@@ -482,7 +527,7 @@ PS2.prototype.port60_write = function(write_byte)
             this.mouse_buffer.push(0xAA);
             this.mouse_buffer.push(0);
 
-            //this.enable_mouse = true;
+            this.use_mouse = true;
             this.bus.send("mouse-enable", true);
 
             this.enable_mouse_stream = false;
@@ -499,9 +544,9 @@ PS2.prototype.port60_write = function(write_byte)
 
         this.mouse_irq();
     }
-    else 
+    else
     {
-        dbg_log("Port 60 data register write: " + h(write_byte), LOG_PS2); 
+        dbg_log("Port 60 data register write: " + h(write_byte), LOG_PS2);
 
         // send ack
         this.mouse_buffer.clear();
@@ -523,7 +568,7 @@ PS2.prototype.port60_write = function(write_byte)
             this.kbd_buffer.push(83);
             break;
         case 0xF3:
-            //  Set typematic rate and delay 
+            //  Set typematic rate and delay
             this.next_read_rate = true;
             break;
         case 0xF4:
@@ -544,11 +589,12 @@ PS2.prototype.port60_write = function(write_byte)
             this.kbd_buffer.clear();
             this.kbd_buffer.push(0xFA);
             this.kbd_buffer.push(0xAA);
+            this.kbd_buffer.push(0);
             break;
         default:
             dbg_log("Unimplemented keyboard command: " + h(write_byte), LOG_PS2);
         }
-        
+
         this.kbd_irq();
     }
 };
@@ -595,7 +641,7 @@ PS2.prototype.port64_write = function(write_byte)
         this.kbd_buffer.push(0x55);
         break;
     case 0xAB:
-        // Test first PS/2 port 
+        // Test first PS/2 port
         this.kbd_buffer.clear();
         this.mouse_buffer.clear();
         this.kbd_buffer.push(0);
